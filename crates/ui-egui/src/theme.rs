@@ -292,9 +292,21 @@ pub(crate) struct SystemFont {
 }
 
 impl SystemFont {
+    /// A face from font file `bytes` (tests: synthetic faces standing in for installed ones).
+    #[cfg(test)]
     pub(crate) fn new(script: &'static str, family: String, bytes: Vec<u8>, index: u32) -> Self {
         let tweak = baseline_tweak(&bytes, index);
         SystemFont { script, family, data: Arc::new(FontData { index, tweak, ..FontData::from_owned(bytes) }) }
+    }
+
+    /// An installed face of the font database, which egui borrows: the database never unloads a
+    /// face ([`designcraft_fonts::FaceRef`]), and egui 0.36 copies owned font data each time it
+    /// builds its fonts, so a copy here meant three copies of the file (the database's, this one
+    /// and egui's).
+    fn installed(script: &'static str, family: String, face: &Arc<designcraft_fonts::FontFace>) -> Self {
+        let face = designcraft_fonts::FaceRef::of(face).get();
+        let font = FontData { index: face.index(), tweak: baseline_tweak(face.data(), face.index()), ..FontData::from_static(face.data()) };
+        SystemFont { script, family, data: Arc::new(font) }
     }
 }
 
@@ -380,7 +392,7 @@ fn installed_ui_fonts(db: &designcraft_fonts::FontDb, craft: &[designcraft_fonts
         });
         let Some((family, face)) = found else { continue };
         if !faces.iter().any(|f| f.family.eq_ignore_ascii_case(family)) {
-            faces.push(SystemFont::new(script, (*family).to_string(), face.data().to_vec(), face.index()));
+            faces.push(SystemFont::installed(script, (*family).to_string(), &face));
         }
     }
     faces
@@ -708,6 +720,11 @@ mod japanese_font_tests {
         let _ = std::fs::remove_dir_all(&dir);
         let picked: Vec<(&str, &str)> = system.iter().map(|f| (f.script, f.family.as_str())).collect();
         assert_eq!(picked, [("Jpan", "Noto Sans CJK JP"), ("Taml", "Nirmala UI"), ("Thai", "Noto Sans Thai")]);
+        // egui borrows the database's bytes: the font file is in memory once, not copied per install
+        for f in &system {
+            let face = db.face(&f.family, "Regular");
+            assert_eq!(f.data.font.as_ptr(), face.data().as_ptr(), "{}: egui must borrow the database's own bytes, not a copy", f.family);
+        }
 
         let mut defs = super::font_definitions(&[], "ja");
         defs.families.entry(egui::FontFamily::Proportional).or_default().push("craft-Stand-in".into());
